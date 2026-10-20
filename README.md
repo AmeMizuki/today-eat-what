@@ -2,6 +2,8 @@
 
 午餐單抽小遊戲。使用 **Svelte 5、JavaScript、Vite、Tailwind CSS、shadcn-svelte**。
 
+![home](https://github.com/AmeMizuki/today-eat-what/releases/download/preview/preview-home.png)
+
 ## 執行
 
 ```sh
@@ -27,6 +29,24 @@ npm run preview
 
 初始餐廳為虛構體驗資料，可自行刪除。
 
-## 資料儲存
+## 流暢動畫效果
+參考著名手遊如《蔚藍檔案》、《公主連結》、《偶像大師灰姑娘》等...。
 
-資料以 JSON 儲存在此瀏覽器的 IndexedDB，不會上傳伺服器，也不跨裝置同步。清除網站資料會失去收藏與紀錄。
+![animation](https://github.com/AmeMizuki/today-eat-what/releases/download/preview/preview-animation.webp)
+
+## 完全自訂
+- 可以自訂餐廳名稱
+- 填寫餐廳地址
+- 自訂餐廳圖示
+- 自訂分類
+
+![menu](https://github.com/AmeMizuki/today-eat-what/releases/download/preview/preview-menu.png)
+
+## 本週菜單
+每週重製菜單，記錄每天挑選的餐廳。
+
+![week](https://github.com/AmeMizuki/today-eat-what/releases/download/preview/preview-week.png)
+
+
+> [!IMPORTANT]
+> 資料以 JSON 儲存在此瀏覽器的 IndexedDB，不會上傳伺服器，也不跨裝置同步。清除網站資料會失去收藏與紀錄。
