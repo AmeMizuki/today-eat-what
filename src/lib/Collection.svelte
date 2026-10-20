@@ -1,13 +1,13 @@
 <script>
-  import { tick } from 'svelte';
-  import { Plus, Search, Trash2, ImagePlus, Utensils, X, ArrowUpRight, MapPin } from '@lucide/svelte';
+  import { onDestroy, tick } from 'svelte';
+  import { Plus, Search, Trash2, ImagePlus, Utensils, X, ArrowUpRight, MapPin, ClipboardPaste, Link } from '@lucide/svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { defaultCategories } from './storage.js';
+  import { imageToWebp, imageUrlPreview } from './image-upload.js';
 
   let { restaurants = [], categories = [], busy = false, onadd, onremove, oncategoryadd, oncategoryremove } = $props();
-  const imageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
   let query = $state('');
   let dialogOpen = $state(false);
   let name = $state('');
@@ -22,6 +22,11 @@
   let image = $state('');
   let imageName = $state('');
   let fileLoading = $state(false);
+  let imageMode = $state('file');
+  let imageUrl = $state('');
+  let imageSize = $state(0);
+  let urlInput = $state(null);
+  let imageAbort;
   let saving = $state(false);
   let nameError = $state('');
   let fileError = $state('');
@@ -30,7 +35,7 @@
   let removingId = $state(null);
   let removeError = $state('');
   let announcement = $state('');
-  let fileInput;
+  let fileInput = $state(null);
   let nameInput = $state(null);
   let searchInput = $state(null);
   let cancelRemoveButton = $state(null);
@@ -84,7 +89,9 @@
   }));
 
   function resetForm() {
-    fileVersion += 1;
+    clearImage();
+    imageMode = 'file';
+    imageUrl = '';
     name = '';
     category = '';
     address = '';
@@ -92,13 +99,7 @@
     categoryOpen = false;
     categoryName = '';
     categoryError = '';
-    image = '';
-    imageName = '';
     nameError = '';
-    fileError = '';
-    saveError = '';
-    fileLoading = false;
-    if (fileInput) fileInput.value = '';
   }
 
   function changeOpen(nextOpen) {
@@ -142,57 +143,113 @@
     }
   }
 
-  async function chooseImage(event) {
-    const input = event.currentTarget;
-    const file = input.files?.[0];
-    if (!file) return;
-    const version = ++fileVersion;
+  function clearImage() {
+    fileVersion += 1;
+    imageAbort?.abort();
+    imageAbort = undefined;
     image = '';
     imageName = '';
+    imageSize = 0;
     fileError = '';
     saveError = '';
+    fileLoading = false;
+    if (fileInput) fileInput.value = '';
+  }
+
+  function switchImageMode(mode) {
+    if (mode === imageMode) return;
+    clearImage();
+    imageMode = mode;
+    imageUrl = '';
+  }
+
+  function beginImage(mode) {
+    clearImage();
+    imageMode = mode;
+    if (mode === 'file') imageUrl = '';
     fileLoading = true;
+    return fileVersion;
+  }
+
+  async function receiveLocalImage(fileOrPromise, label) {
+    const version = beginImage('file');
     try {
-      if (!imageTypes.has(file.type)) throw new Error('請選擇 JPG、PNG、WebP 或 GIF 圖片。');
-      if (file.size > 4 * 1024 * 1024) throw new Error('圖片不可超過 4 MB，請選擇較小的檔案。');
-      const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
-      const matches = (signature, offset = 0) => signature.every((byte, index) => bytes[offset + index] === byte);
-      const isRaster = matches([0xff, 0xd8, 0xff])
-        || matches([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-        || matches([0x47, 0x49, 0x46, 0x38, 0x37, 0x61])
-        || matches([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
-        || (matches([0x52, 0x49, 0x46, 0x46]) && matches([0x57, 0x45, 0x42, 0x50], 8));
-      if (!isRaster) throw new Error('圖片格式無效，請使用真正的 JPG、PNG、WebP 或 GIF 圖片。');
+      const file = await fileOrPromise;
       if (version !== fileVersion || !dialogOpen) return;
-      const data = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => typeof reader.result === 'string'
-          ? resolve(reader.result)
-          : reject(new Error('圖片讀取失敗，請重新選擇。'));
-        reader.onerror = () => reject(new Error('圖片讀取失敗，請重新選擇。'));
-        reader.onabort = () => reject(new Error('圖片讀取已中止，請重新選擇。'));
-        reader.readAsDataURL(file);
-      });
+      const prepared = await imageToWebp(file);
       if (version !== fileVersion || !dialogOpen) return;
-      const decoded = new Image();
-      decoded.src = data;
-      try {
-        await decoded.decode();
-      } catch {
-        throw new Error('這張圖片無法開啟，請選擇其他有效的圖片。');
-      }
-      if (!decoded.naturalWidth || !decoded.naturalHeight) throw new Error('圖片內容無效，請選擇其他圖片。');
-      if (version !== fileVersion || !dialogOpen) return;
-      image = data;
-      imageName = file.name;
+      image = prepared.data;
+      imageSize = prepared.size;
+      imageName = `${(label || file.name || '貼上的圖片').replace(/\.[^.]+$/, '')}.webp`;
+      announcement = '圖片已壓縮為 WebP，可加入圖鑑。';
     } catch (error) {
-      if (version !== fileVersion || !dialogOpen) return;
-      fileError = error instanceof Error ? error.message : '圖片讀取失敗，請重新選擇。';
-      input.value = '';
+      if (version === fileVersion && dialogOpen) {
+        fileError = error instanceof Error ? error.message : '圖片處理失敗，請重新選擇。';
+      }
     } finally {
       if (version === fileVersion) fileLoading = false;
     }
   }
+
+  function chooseImage(event) {
+    const file = event.currentTarget.files?.[0];
+    if (file) void receiveLocalImage(file);
+  }
+
+  function pasteImage(event) {
+    if (!dialogOpen || saving || busy || categorySaving) return;
+    const item = Array.from(event.clipboardData?.items || [])
+      .find(item => item.kind === 'file' && item.type.startsWith('image/'));
+    const file = item?.getAsFile();
+    if (!file) return;
+    event.preventDefault();
+    void receiveLocalImage(file, '貼上的圖片');
+  }
+
+  async function readClipboardImage() {
+    if (!navigator.clipboard?.read) {
+      throw new Error('瀏覽器不支援直接讀取剪貼簿，請在此視窗按 Ctrl+V 或 ⌘V 貼上圖片。');
+    }
+    let items;
+    try { items = await navigator.clipboard.read(); }
+    catch { throw new Error('無法讀取剪貼簿，請允許存取，或按 Ctrl+V／⌘V 貼上圖片。'); }
+    for (const item of items) {
+      const type = item.types.includes('image/png') ? 'image/png' : item.types.find(type => type.startsWith('image/'));
+      if (type) return item.getType(type);
+    }
+    throw new Error('剪貼簿裡沒有圖片，請先複製圖片再貼上；圖片網址請填入「圖片網址」。');
+  }
+
+  function pasteFromClipboard() {
+    if (saving || busy || categorySaving) return;
+    void receiveLocalImage(readClipboardImage(), '貼上的圖片');
+  }
+
+  async function useImageUrl() {
+    const version = beginImage('url');
+    imageAbort = new AbortController();
+    try {
+      const url = await imageUrlPreview(imageUrl, imageAbort.signal);
+      if (version !== fileVersion || !dialogOpen) return;
+      image = url;
+      imageName = '網址圖片（保留原始連結）';
+      announcement = '圖片網址已確認，可加入圖鑑。';
+    } catch (error) {
+      if (version === fileVersion && dialogOpen) {
+        fileError = error instanceof Error ? error.message : '圖片網址無法載入，請重新確認。';
+      }
+    } finally {
+      if (version === fileVersion) {
+        fileLoading = false;
+        imageAbort = undefined;
+      }
+    }
+  }
+
+  onDestroy(() => {
+    fileVersion += 1;
+    imageAbort?.abort();
+  });
 
   async function submit(event) {
     event.preventDefault();
@@ -212,9 +269,15 @@
       document.getElementById('restaurant-address')?.focus();
       return;
     }
+    if (imageMode === 'url' && (!image || image !== imageUrl.trim())) {
+      await useImageUrl();
+      if (!dialogOpen || imageMode !== 'url' || !image || image !== imageUrl.trim()) return;
+      if (busy || saving || categorySaving || fileLoading) return;
+    }
     if (!image) {
-      fileError = fileError || '請先上傳一張店家或餐點圖片。';
-      fileInput?.focus();
+      fileError = fileError || '請選擇或貼上圖片，或填入圖片網址。';
+      if (imageMode === 'url') urlInput?.focus();
+      else fileInput?.focus();
       return;
     }
     saving = true;
@@ -266,6 +329,8 @@
     }
   }
 </script>
+
+<svelte:window onpaste={pasteImage} />
 
 <section id="collection" aria-labelledby="collection-heading" class="collection">
   <div class="section-header">
@@ -320,22 +385,32 @@
               {#if addressError}<p id="restaurant-address-error" class="field-error" role="alert">{addressError}</p>{/if}
             </div>
             <div class="form-field">
-              <label for="restaurant-image">店家或餐點圖片 <span aria-hidden="true">*</span></label>
+              <label for={imageMode === 'url' ? 'restaurant-image-url' : 'restaurant-image'}>店家或餐點圖片 <span aria-hidden="true">*</span></label>
+              <div class="image-methods" role="group" aria-label="圖片來源">
+                <Button type="button" variant={imageMode === 'file' ? 'secondary' : 'outline'} aria-pressed={imageMode === 'file'} onclick={() => switchImageMode('file')}><ImagePlus size={16} aria-hidden="true" />上傳圖片</Button>
+                <Button type="button" variant={imageMode === 'url' ? 'secondary' : 'outline'} aria-pressed={imageMode === 'url'} onclick={() => switchImageMode('url')}><Link size={16} aria-hidden="true" />圖片網址</Button>
+                <Button type="button" variant="outline" onclick={pasteFromClipboard}><ClipboardPaste size={16} aria-hidden="true" />從剪貼簿貼上</Button>
+              </div>
               <div class="image-upload" class:has-image={!!image}>
                 {#if image}
-                  <img class="image-preview" src={image} alt={`「${name.trim() || '新增店家'}」的上傳圖片預覽`} />
-                  <p class="image-filename">{imageName}</p>
-                {:else}
+                  <img class="image-preview" src={image} referrerpolicy="no-referrer" alt={`「${name.trim() || '新增店家'}」的圖片預覽`} />
+                  <p class="image-filename">{imageName}{imageSize ? ` · ${Math.max(1, Math.round(imageSize / 1024))} KB` : ''}</p>
+                {:else if imageMode === 'file'}
                   <div class="upload-prompt">
                     <ImagePlus size={28} strokeWidth={1.5} aria-hidden="true" />
-                    <p>{fileLoading ? '正在讀取圖片…' : '讓美味先被看見'}</p>
-                    <span>上傳一張你喜歡的店家或餐點照片</span>
+                    <p>{fileLoading ? '正在壓縮圖片…' : '讓美味先被看見'}</p>
+                    <span>選擇檔案，或直接按 Ctrl+V／⌘V 貼上圖片</span>
                   </div>
                 {/if}
-                <input id="restaurant-image" name="restaurant-image" type="file" bind:this={fileInput} accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseImage} aria-required="true" aria-invalid={!!fileError} aria-describedby={`restaurant-image-hint${fileError ? ' restaurant-image-error' : ''}`} />
+                {#if imageMode === 'file'}
+                  <input id="restaurant-image" name="restaurant-image" type="file" bind:this={fileInput} accept="image/jpeg,image/png,image/webp,image/gif" onchange={chooseImage} aria-required="true" aria-invalid={!!fileError} aria-describedby={`restaurant-image-hint${fileError ? ' restaurant-image-error' : ''}`} />
+                {:else}
+                  <Input id="restaurant-image-url" name="restaurant-image-url" type="url" inputmode="url" bind:ref={urlInput} bind:value={imageUrl} oninput={clearImage} placeholder="https://example.com/photo.jpg" autocomplete="off" aria-required="true" aria-invalid={!!fileError} aria-describedby={`restaurant-image-hint${fileError ? ' restaurant-image-error' : ''}`} onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); if (!fileLoading) useImageUrl(); } }} />
+                  <Button type="button" variant="outline" onclick={useImageUrl} disabled={fileLoading}>使用網址</Button>
+                {/if}
               </div>
-              <p class="field-hint" id="restaurant-image-hint">JPG、PNG、WebP 或 GIF，檔案大小上限 4 MB。</p>
-              <p class="field-hint" role="status">{fileLoading ? '正在讀取並確認圖片，請稍候。' : ''}</p>
+              <p class="field-hint" id="restaurant-image-hint">{imageMode === 'url' ? '請使用可公開載入的圖片直連網址；保留原連結，不轉檔。' : 'JPG、PNG、WebP 或 GIF，上限 4 MB。自動壓縮為 WebP，GIF 會轉為靜態圖片。'}</p>
+              <p class="field-hint" role="status">{fileLoading ? (imageMode === 'url' ? '正在確認圖片網址…' : '正在轉換並壓縮為 WebP…') : ''}</p>
               {#if fileError}<p class="field-error" id="restaurant-image-error" role="alert">{fileError}</p>{/if}
             </div>
           </fieldset>
@@ -397,7 +472,7 @@
       {#each filtered as restaurant (restaurant.id)}
         <article class="restaurant-card" aria-labelledby={`restaurant-${restaurant.id}`}>
           <div class="card-image-wrap">
-            <img class="card-image" src={restaurant.image} alt={`${restaurant.name}的店家或餐點照片`} loading="lazy" />
+            <img class="card-image" src={restaurant.image} referrerpolicy="no-referrer" alt={`${restaurant.name}的店家或餐點照片`} loading="lazy" />
             <span class="card-category">{restaurant.category || '自選店家'}</span>
           </div>
           <div class="card-body">
@@ -495,6 +570,10 @@
   .category-fields { display: grid; gap: 8px; border: 1px solid var(--line, #e9e3da); padding: 12px; border-radius: 10px; min-width: 0; }
   .restaurant-form :global(button), .collection :global(button) { font-size: 14px; min-height: 40px; }
   .image-upload { background: #f3eee6; border: 1px dashed #a99f94; border-radius: 10px; padding: 17px; min-width: 0; }
+  .image-methods { display: flex; flex-wrap: wrap; gap: 8px; }
+  .image-methods :global(button) { flex: 1 1 auto; }
+  .image-upload :global(input[type="url"]) { margin-top: 4px; }
+  .image-upload > :global(button) { width: 100%; margin-top: 10px; }
   .upload-prompt { text-align: center; padding: 4px 0 15px; color: #857561; }
   .upload-prompt > :global(svg) { margin: 0 auto 9px; }
   .upload-prompt p { font-size: 16px; color: var(--ink, #302c28); margin: 0 0 5px; }

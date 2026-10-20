@@ -86,7 +86,7 @@
     <section class="settled-result" aria-label="今日午餐結果">
       <div class="result-art">
         {#if restaurant.image && !imageFailed}
-          <img src={restaurant.image} alt="餐廳照片" onerror={() => { imageFailed = true; }} />
+          <img src={restaurant.image} referrerpolicy="no-referrer" alt="餐廳照片" onerror={() => { imageFailed = true; }} />
         {:else}
           <div class="result-photo-fallback"><UtensilsCrossed size={64} strokeWidth={1.2} /><span>尚無餐廳照片</span></div>
         {/if}
@@ -157,7 +157,7 @@
             <div class="restaurant-photo">
               <div class="photo-fallback"><UtensilsCrossed size={58} strokeWidth={1.2} /><span>美味，值得期待</span></div>
               {#if restaurant.image && !imageFailed}
-                <img src={restaurant.image} alt="" loading="eager" onerror={() => { imageFailed = true; }} />
+                <img src={restaurant.image} referrerpolicy="no-referrer" alt="" loading="eager" onerror={() => { imageFailed = true; }} />
               {/if}
               <span class="chosen-label"><Sparkles size={14} /> 今日之選</span>
             </div>

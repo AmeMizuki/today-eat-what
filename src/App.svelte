@@ -171,7 +171,7 @@
       <section class="weekly-section" aria-labelledby="weekly-title">
         <div class="section-heading"><div><h2 id="weekly-title">這週的美味足跡<span class="small-tag">{weekLabel}</span></h2><p>好好吃飯，也是認真生活的一部分。</p></div><button class="text-link" onclick={() => navigate('week')}>查看本週菜單<ArrowRight size={16} /></button></div>
         <div class="week-grid">
-          {#each days as day}<div class="day-tile" class:is-today={day.key === today} class:has-pick={!!day.pick}><div class="day-top"><span>週{day.label}</span><span>{day.key === today ? '今天' : `${day.date.getMonth() + 1}/${day.date.getDate()}`}</span></div>{#if day.pick}<img src={day.pick.image} alt="" /><strong>{day.pick.name}</strong>{:else}<span class="day-placeholder">{day.key === today ? '好運待揭曉' : day.key < today ? '尚未記錄' : '期待下一餐'}</span><span class="day-dash">{day.key === today ? 'TODAY’S LUNCH' : '・'}</span>{/if}</div>{/each}
+          {#each days as day}<div class="day-tile" class:is-today={day.key === today} class:has-pick={!!day.pick}><div class="day-top"><span>週{day.label}</span><span>{day.key === today ? '今天' : `${day.date.getMonth() + 1}/${day.date.getDate()}`}</span></div>{#if day.pick}<img src={day.pick.image} referrerpolicy="no-referrer" alt="" /><strong>{day.pick.name}</strong>{:else}<span class="day-placeholder">{day.key === today ? '好運待揭曉' : day.key < today ? '尚未記錄' : '期待下一餐'}</span><span class="day-dash">{day.key === today ? 'TODAY’S LUNCH' : '・'}</span>{/if}</div>{/each}
         </div>
         <div class="week-caption"><CalendarDays size={14} /><span>每週一開啟新篇章，店家收藏不會消失。</span><span class="count-note">已收藏 {selectedCount} 餐日常</span></div>
       </section>
@@ -187,7 +187,7 @@
             <article class="week-entry" class:today-entry={day.key === today}>
               <div class="entry-date"><strong>週{day.label}</strong><span>{day.date.getMonth() + 1} / {day.date.getDate()}</span></div>
               {#if day.pick}
-                <img src={day.pick.image} alt={day.pick.name} />
+                <img src={day.pick.image} referrerpolicy="no-referrer" alt={day.pick.name} />
                 <div class="entry-content"><span>{day.pick.category || '自選店家'}</span><h2>{day.pick.name}</h2>{#if day.pick.address}<p class="restaurant-address"><MapPin size={15} aria-hidden="true" /><span>{day.pick.address}</span></p>{/if}</div>
                 <span class="confirmed-label"><Check size={14} />已確認</span>
               {:else}
