@@ -15,6 +15,8 @@
   let address = $state('');
   let editingRestaurant = $state(null);
   let rating = $state(0);
+  let ratingHover = $state(0);
+  let selecting = $state(false);
   let ratingError = $state('');
   let selectedIds = $state([]);
   let batchRemoval = $state([]);
@@ -107,6 +109,15 @@
     selectedIds = checked ? [...new Set([...selectedIds, ...visibleIds])] : selectedIds.filter((id) => !visibleIds.includes(id));
   }
 
+  function toggleSelectionMode() {
+    selecting = !selecting;
+    if (!selecting) {
+      selectedIds = [];
+      batchRemoval = [];
+      removeError = '';
+    }
+  }
+
   function openEdit(restaurant) {
     if (!restaurant || busy || saving || removingId) return;
     resetForm();
@@ -134,6 +145,7 @@
     address = '';
     editingRestaurant = null;
     rating = 0;
+    ratingHover = 0;
     ratingError = '';
     addressError = '';
     categoryOpen = false;
@@ -318,7 +330,7 @@
     }
     if (!Number.isInteger(rating) || rating < 0 || rating > 5) {
       ratingError = '請選擇 0 至 5 星的評分。';
-      document.getElementById('restaurant-rating-0')?.focus();
+      document.getElementById('restaurant-rating-1')?.focus();
       return;
     }
     if (imageMode === 'url' && (!image || image !== imageUrl.trim())) {
@@ -429,7 +441,8 @@
           <Dialog.Description>{editingRestaurant ? '更新店家資料或評分，不會改變已記錄的歷史菜單。' : '放上美味的照片，將喜歡的店家加入午餐抽選。'}</Dialog.Description>
         </Dialog.Header>
         <form onsubmit={submit} class="restaurant-form" aria-busy={saving || categorySaving}>
-          <fieldset disabled={saving || busy || categorySaving}>
+          <fieldset class="form-columns" disabled={saving || busy || categorySaving}>
+            <div class="form-details">
             <div class="form-field">
               <label for="restaurant-name">店家名稱 <span aria-hidden="true">*</span></label>
               <Input id="restaurant-name" name="restaurant-name" bind:ref={nameInput} bind:value={name} required maxlength={40} placeholder="例如：巷口的日式食堂" autocomplete="off" aria-invalid={!!nameError} aria-describedby={nameError ? 'restaurant-name-error' : undefined} />
@@ -461,17 +474,22 @@
             <fieldset class="rating-field" aria-describedby={ratingError ? 'restaurant-rating-error' : undefined}>
               <legend>店家評分 <span class="optional">選填</span></legend>
               <div class="rating-options">
-                {#each [0, 1, 2, 3, 4, 5] as value}
-                  <label class="rating-option" class:chosen={rating === value}>
-                    <input id={`restaurant-rating-${value}`} type="radio" name="restaurant-rating" {value} bind:group={rating} />
-                    {#if value > 0}<Star size={15} fill="currentColor" aria-hidden="true" />{/if}
-                    <span>{value === 0 ? '未評分（0 星）' : `${value} 星`}</span>
+                {#each [1, 2, 3, 4, 5] as value}
+                  <label class="rating-option" onpointerenter={() => ratingHover = value} onpointerleave={() => ratingHover = 0}>
+                    <input id={`restaurant-rating-${value}`} type="radio" name="restaurant-rating" {value} bind:group={rating} onchange={() => ratingHover = 0} />
+                    <Star size={30} fill={value <= (ratingHover || rating) ? 'currentColor' : 'none'} strokeWidth={1.5} aria-hidden="true" />
+                    <span class="sr-only">評分 {value} 星</span>
                   </label>
                 {/each}
               </div>
+              <div class="rating-summary">
+                <span role="status">{rating ? `${rating} / 5 顆星` : '尚未評分'}</span>
+                <button type="button" class="clear-rating" disabled={!rating} onclick={() => { rating = 0; ratingHover = 0; }}>清除評分</button>
+              </div>
               {#if ratingError}<p id="restaurant-rating-error" class="field-error" role="alert">{ratingError}</p>{/if}
             </fieldset>
-            <div class="form-field">
+            </div>
+            <div class="form-field image-field">
               <label for={imageMode === 'url' ? 'restaurant-image-url' : 'restaurant-image'}>店家或餐點圖片 <span aria-hidden="true">*</span></label>
               <div class="image-methods" role="group" aria-label="圖片來源">
                 <Button type="button" variant={imageMode === 'file' ? 'secondary' : 'outline'} aria-pressed={imageMode === 'file'} onclick={() => switchImageMode('file')}><ImagePlus size={16} aria-hidden="true" />上傳圖片</Button>
@@ -550,9 +568,13 @@
       <label class="sr-only" for="collection-search">搜尋店家名稱、料理分類或地址</label>
       <Input id="collection-search" name="collection-search" type="search" bind:ref={searchInput} bind:value={query} placeholder="搜尋店家、分類、地址…" class="collection-search" />
     </div>
-    <span class="result-count" role="status">{query.trim() ? `找到 ${filtered.length} 間店家` : '每一間，都是午餐的好選擇。'}</span>
+    <div class="toolbar-summary">
+      <span class="result-count" role="status">{query.trim() ? `找到 ${filtered.length} 間店家` : '每一間，都是午餐的好選擇。'}</span>
+      <Button type="button" variant="outline" disabled={busy || !!removingId || !restaurants.length} aria-pressed={selecting} onclick={toggleSelectionMode}>{selecting ? '取消選取' : '選取店家'}</Button>
+    </div>
   </div>
 
+  {#if selectedRestaurants.length}
   <div class="selection-toolbar" role="group" aria-label="管理勾選店家">
     <label class="selection-label">
       <input type="checkbox" name="select-visible-restaurants" checked={allVisibleSelected} disabled={busy || !!removingId || !filtered.length} onchange={(event) => toggleVisible(event.currentTarget.checked)} />
@@ -560,13 +582,11 @@
     </label>
     <p class="selection-count" role="status">已選 {selectedRestaurants.length} 間{hiddenSelectedCount ? `（含搜尋範圍外 ${hiddenSelectedCount} 間）` : ''}</p>
     <div class="selection-actions">
-      <Button type="button" variant="outline" disabled={busy || !!removingId || selectedRestaurants.length !== 1} onclick={() => openEdit(selectedRestaurants[0])}><Pencil size={16} aria-hidden="true" />編輯所選店家</Button>
       <Button id="remove-selected-restaurants" type="button" variant="outline" disabled={busy || !!removingId || !selectedRestaurants.length} onclick={askBatchRemove}><Trash2 size={16} aria-hidden="true" />刪除所選店家</Button>
-      {#if selectedRestaurants.length}
-        <Button type="button" variant="ghost" disabled={busy || !!removingId} onclick={() => { selectedIds = []; }}>清除勾選</Button>
-      {/if}
+      <Button type="button" variant="ghost" disabled={busy || !!removingId} onclick={() => { selectedIds = []; batchRemoval = []; removeError = ''; }}>清除勾選</Button>
     </div>
   </div>
+  {/if}
   {#if batchRemoval.length}
     <div class="remove-confirmation batch-confirmation" aria-labelledby="batch-removal-heading" aria-busy={!!removingId}>
       <h3 id="batch-removal-heading">確定移除這 {batchRemoval.length} 間店家？</h3>
@@ -590,15 +610,20 @@
             <span class="card-category">{restaurant.category || '自選店家'}</span>
           </div>
           <div class="card-body">
+            {#if selecting}
             <label class="selection-label card-selection">
               <input type="checkbox" name="selected-restaurants" value={restaurant.id} checked={selectedIds.includes(restaurant.id)} disabled={busy || !!removingId} onchange={(event) => toggleSelected(restaurant.id, event.currentTarget.checked)} />
               <span>選取<span class="sr-only">「{restaurant.name}」</span></span>
             </label>
+            {/if}
             <div class="card-title-row">
               <h3 id={`restaurant-${restaurant.id}`}>{restaurant.name}</h3>
+              <div class="card-actions">
+                <Button type="button" variant="ghost" size="icon" class="remove-button" title="編輯店家" aria-label={`編輯店家「${restaurant.name}」`} disabled={busy || !!removingId} onclick={() => openEdit(restaurant)}><Pencil size={17} strokeWidth={1.6} aria-hidden="true" /></Button>
               <Button id={`remove-restaurant-${restaurant.id}`} type="button" variant="ghost" size="icon" class="remove-button" aria-label={`移除「${restaurant.name}」`} disabled={busy || !!removingId} onclick={() => askRemove(restaurant.id)}>
                 <Trash2 size={16} strokeWidth={1.6} aria-hidden="true" />
               </Button>
+              </div>
             </div>
             <p class="card-rating">
               {#each [1, 2, 3, 4, 5] as value}
@@ -657,6 +682,8 @@
   .category-row :global(button) { flex-shrink: 0; }
   :global(.collection-add) { background: var(--accent, #bd492e); color: white; border-radius: 9px; min-height: 44px; gap: 7px; padding-inline: 17px; font-size: 14px; box-shadow: 0 3px 7px #963a2110; }
   .collection-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 24px; }
+  .toolbar-summary { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 16px; }
+  .card-actions { display: flex; flex-shrink: 0; gap: 4px; }
   .search-field { position: relative; width: min(100%, 330px); }
   .search-field > :global(svg) { position: absolute; left: 13px; top: 50%; translate: 0 -50%; color: var(--muted, #827a72); pointer-events: none; }
   :global(.collection-search) { background: #fff; padding-left: 39px; border: 1px solid #b6ada4; border-radius: 9px; min-height: 44px; font-size: 16px; }
@@ -683,16 +710,23 @@
   .empty-icon { display: grid; place-items: center; background: #eee8df; color: #8e7f6e; width: 62px; height: 62px; border-radius: 20px; margin: 0 auto 20px; }
   .empty-state p { color: var(--muted, #797169); font-size: 14px; line-height: 1.8; margin: 10px 0 22px; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
-  :global(.collection-dialog) { width: min(480px, calc(100% - 32px)); max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; border-radius: 18px; background: var(--paper, #fbf9f5); color: var(--ink, #302c28); padding: 27px; }
+  :global(.collection-dialog) { width: min(880px, calc(100% - 32px)); max-width: min(880px, calc(100% - 32px)); max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; border-radius: 18px; background: var(--paper, #fbf9f5); color: var(--ink, #302c28); padding: 32px; }
   .restaurant-form { margin-top: 7px; font-size: 16px; line-height: 1.6; }
   fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 19px; }
+  .form-columns { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 28px; }
+  .form-details { display: grid; gap: 20px; min-width: 0; }
+  @media (min-width: 760px) { .form-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; } }
   .rating-field { display: block; }
   .rating-field legend { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
-  .rating-options { display: flex; flex-wrap: wrap; gap: 8px; }
-  .rating-option { display: flex; align-items: center; gap: 6px; min-height: 42px; border: 1px solid #a99f94; border-radius: 8px; background: white; padding: 7px 10px; cursor: pointer; }
-  .rating-option.chosen { border-color: #934022; background: #f8eae2; }
-  .rating-option :global(svg) { color: #934022; }
-  .rating-option input, .selection-label input { width: 18px; height: 18px; flex-shrink: 0; accent-color: #934022; cursor: pointer; }
+  .rating-options { display: flex; flex-wrap: wrap; gap: 2px; }
+  .rating-option { position: relative; display: grid; place-items: center; width: 44px; height: 44px; color: #934022; border-radius: 6px; cursor: pointer; }
+  .rating-option input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+  .rating-option:has(input:focus-visible) { outline: 2px solid #934022; outline-offset: 2px; }
+  .rating-option:has(input:disabled) { opacity: .5; cursor: not-allowed; }
+  .rating-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; color: var(--muted, #797169); font-size: 14px; }
+  .clear-rating { text-decoration: underline; text-underline-offset: 4px; cursor: pointer; color: var(--accent, #bd492e); }
+  .clear-rating:disabled { color: var(--muted, #797169); opacity: .6; cursor: not-allowed; }
+  .selection-label input { width: 18px; height: 18px; flex-shrink: 0; accent-color: #934022; cursor: pointer; }
   .selection-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 24px; }
   .selection-label { display: flex; align-items: center; gap: 8px; min-height: 40px; font-size: 14px; cursor: pointer; }
   .selection-count { font-size: 14px; color: #6e6458; margin: 0; overflow-wrap: anywhere; }
@@ -717,13 +751,13 @@
   .image-methods :global(button) { flex: 1 1 auto; }
   .image-upload :global(input[type="url"]) { margin-top: 4px; }
   .image-upload > :global(button) { width: 100%; margin-top: 10px; }
-  .upload-prompt { text-align: center; padding: 4px 0 15px; color: #857561; }
+  .upload-prompt { text-align: center; padding: 28px 0; color: #857561; }
   .upload-prompt > :global(svg) { margin: 0 auto 9px; }
   .upload-prompt p { font-size: 16px; color: var(--ink, #302c28); margin: 0 0 5px; }
   .upload-prompt span { font-size: 14px; }
   input[type="file"] { display: block; width: 100%; min-width: 0; font-size: 16px; color: #6e6458; }
   input[type="file"]::file-selector-button { border: 1px solid #a99f94; background: white; color: var(--ink, #302c28); border-radius: 6px; min-height: 36px; padding: 7px 11px; margin-right: 10px; cursor: pointer; }
-  .image-preview { display: block; width: 100%; max-height: 180px; object-fit: cover; border-radius: 7px; outline: 1px solid #00000015; outline-offset: -1px; }
+  .image-preview { display: block; width: 100%; aspect-ratio: 4 / 3; max-height: 300px; object-fit: cover; border-radius: 7px; outline: 1px solid #00000015; outline-offset: -1px; }
   .image-filename { margin: 9px 0 13px; font-size: 14px; overflow-wrap: anywhere; color: #6e6458; }
   .field-hint { color: #776b5f; font-size: 14px; line-height: 1.6; margin: 0; }
   .field-hint:empty, .form-error:empty { display: none; }
