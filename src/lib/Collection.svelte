@@ -1,18 +1,24 @@
 <script>
   import { onDestroy, tick } from 'svelte';
-  import { Plus, Search, Trash2, ImagePlus, Utensils, X, ArrowUpRight, MapPin, ClipboardPaste, Link } from '@lucide/svelte';
+  import { Plus, Search, Trash2, ImagePlus, Utensils, X, ArrowUpRight, MapPin, ClipboardPaste, Link, Pencil, Star } from '@lucide/svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import * as Dialog from '$lib/components/ui/dialog/index.js';
   import { defaultCategories } from './storage.js';
   import { imageToWebp, imageUrlPreview } from './image-upload.js';
 
-  let { restaurants = [], categories = [], busy = false, onadd, onremove, oncategoryadd, oncategoryremove } = $props();
+  let { restaurants = [], categories = [], busy = false, onadd, onupdate, onremove, oncategoryadd, oncategoryremove } = $props();
   let query = $state('');
   let dialogOpen = $state(false);
   let name = $state('');
   let category = $state('');
   let address = $state('');
+  let editingRestaurant = $state(null);
+  let rating = $state(0);
+  let ratingError = $state('');
+  let selectedIds = $state([]);
+  let batchRemoval = $state([]);
+  let batchCancelButton = $state(null);
   let addressError = $state('');
   let categoryOpen = $state(false);
   let categoryName = $state('');
@@ -88,6 +94,37 @@
     return !term || `${restaurant.name} ${restaurant.category || ''} ${restaurant.address || ''}`.toLocaleLowerCase().includes(term);
   }));
 
+  const selectedRestaurants = $derived(restaurants.filter((restaurant) => selectedIds.includes(restaurant.id)));
+  const hiddenSelectedCount = $derived(selectedRestaurants.filter((restaurant) => !filtered.some((item) => item.id === restaurant.id)).length);
+  const allVisibleSelected = $derived(filtered.length > 0 && filtered.every((restaurant) => selectedIds.includes(restaurant.id)));
+
+  function toggleSelected(id, checked) {
+    selectedIds = checked ? [...selectedIds, id] : selectedIds.filter((item) => item !== id);
+  }
+
+  function toggleVisible(checked) {
+    const visibleIds = filtered.map((restaurant) => restaurant.id);
+    selectedIds = checked ? [...new Set([...selectedIds, ...visibleIds])] : selectedIds.filter((id) => !visibleIds.includes(id));
+  }
+
+  function openEdit(restaurant) {
+    if (!restaurant || busy || saving || removingId) return;
+    resetForm();
+    editingRestaurant = restaurant;
+    name = restaurant.name;
+    category = restaurant.category || '';
+    address = restaurant.address || '';
+    rating = Number.isInteger(restaurant.rating) && restaurant.rating >= 0 && restaurant.rating <= 5 ? restaurant.rating : 0;
+    image = restaurant.image;
+    imageName = '目前儲存的圖片';
+    if (/^https?:\/\//i.test(image)) {
+      imageMode = 'url';
+      imageUrl = image;
+      imageName = '網址圖片（保留原始連結）';
+    }
+    dialogOpen = true;
+  }
+
   function resetForm() {
     clearImage();
     imageMode = 'file';
@@ -95,6 +132,9 @@
     name = '';
     category = '';
     address = '';
+    editingRestaurant = null;
+    rating = 0;
+    ratingError = '';
     addressError = '';
     categoryOpen = false;
     categoryName = '';
@@ -226,6 +266,12 @@
   }
 
   async function useImageUrl() {
+    if (imageUrl.trim() && (image === imageUrl.trim() || editingRestaurant?.image === imageUrl.trim())) {
+      clearImage();
+      image = imageUrl.trim();
+      imageName = '網址圖片（保留原始連結）';
+      return;
+    }
     const version = beginImage('url');
     imageAbort = new AbortController();
     try {
@@ -257,6 +303,7 @@
     nameError = '';
     saveError = '';
     addressError = '';
+    ratingError = '';
     const trimmedName = name.trim();
     if (!trimmedName || trimmedName.length > 40) {
       nameError = '請填寫 1 至 40 字的店家名稱。';
@@ -267,6 +314,11 @@
     if (trimmedAddress.length > 200) {
       addressError = '地址請填寫 200 字以內。';
       document.getElementById('restaurant-address')?.focus();
+      return;
+    }
+    if (!Number.isInteger(rating) || rating < 0 || rating > 5) {
+      ratingError = '請選擇 0 至 5 星的評分。';
+      document.getElementById('restaurant-rating-0')?.focus();
       return;
     }
     if (imageMode === 'url' && (!image || image !== imageUrl.trim())) {
@@ -282,14 +334,16 @@
     }
     saving = true;
     try {
-      await onadd({
-        id: crypto.randomUUID(),
+      const saveRestaurant = editingRestaurant ? onupdate : onadd;
+      await saveRestaurant({
+        id: editingRestaurant?.id || crypto.randomUUID(),
         name: trimmedName,
         image,
+        rating,
         ...(category ? { category } : {}),
         ...(trimmedAddress ? { address: trimmedAddress } : {}),
       });
-      announcement = `已新增「${trimmedName}」。`;
+      announcement = `已${editingRestaurant ? '更新' : '新增'}「${trimmedName}」。`;
       dialogOpen = false;
       resetForm();
     } catch {
@@ -301,6 +355,7 @@
 
   async function askRemove(id) {
     confirmingId = id;
+    batchRemoval = [];
     removeError = '';
     await tick();
     cancelRemoveButton?.focus();
@@ -313,17 +368,36 @@
     document.getElementById(`remove-restaurant-${id}`)?.focus();
   }
 
-  async function removeRestaurant(restaurant) {
-    if (busy || removingId) return;
-    removingId = restaurant.id;
+  async function askBatchRemove() {
+    if (!selectedRestaurants.length || busy || removingId) return;
+    confirmingId = null;
+    batchRemoval = selectedRestaurants.map(({ id, name }) => ({ id, name }));
+    removeError = '';
+    await tick();
+    batchCancelButton?.focus();
+  }
+
+  async function cancelBatchRemove() {
+    batchRemoval = [];
+    removeError = '';
+    await tick();
+    document.getElementById('remove-selected-restaurants')?.focus();
+  }
+
+  async function removeRestaurants(items) {
+    if (busy || removingId || !items.length) return;
+    const ids = items.map((restaurant) => restaurant.id);
+    removingId = ids[0];
     removeError = '';
     try {
-      await onremove(restaurant.id);
+      await onremove(ids);
+      selectedIds = selectedIds.filter((id) => !ids.includes(id));
       confirmingId = null;
-      announcement = `已移除「${restaurant.name}」。`;
+      batchRemoval = [];
+      announcement = `已移除 ${items.length} 間店家：${items.map((restaurant) => restaurant.name).join('、')}。歷史菜單已保留。`;
       searchInput?.focus();
     } catch {
-      removeError = '移除失敗，店家仍在圖鑑中。請再試一次。';
+      removeError = '移除失敗，店家與勾選項目均已保留。請再試一次。';
     } finally {
       removingId = null;
     }
@@ -351,8 +425,8 @@
       </Dialog.Trigger>
       <Dialog.Content class="collection-dialog motion-reduce:animate-none" showCloseButton={false}>
         <Dialog.Header>
-          <Dialog.Title>收藏一間好店</Dialog.Title>
-          <Dialog.Description>放上美味的照片，將喜歡的店家加入午餐抽選。</Dialog.Description>
+          <Dialog.Title>{editingRestaurant ? '編輯店家資料' : '收藏一間好店'}</Dialog.Title>
+          <Dialog.Description>{editingRestaurant ? '更新店家資料或評分，不會改變已記錄的歷史菜單。' : '放上美味的照片，將喜歡的店家加入午餐抽選。'}</Dialog.Description>
         </Dialog.Header>
         <form onsubmit={submit} class="restaurant-form" aria-busy={saving || categorySaving}>
           <fieldset disabled={saving || busy || categorySaving}>
@@ -384,6 +458,19 @@
               <Input id="restaurant-address" name="restaurant-address" bind:value={address} maxlength={200} autocomplete="street-address" placeholder="方便下次找到這間好店" aria-invalid={!!addressError} aria-describedby={addressError ? 'restaurant-address-error' : undefined} />
               {#if addressError}<p id="restaurant-address-error" class="field-error" role="alert">{addressError}</p>{/if}
             </div>
+            <fieldset class="rating-field" aria-describedby={ratingError ? 'restaurant-rating-error' : undefined}>
+              <legend>店家評分 <span class="optional">選填</span></legend>
+              <div class="rating-options">
+                {#each [0, 1, 2, 3, 4, 5] as value}
+                  <label class="rating-option" class:chosen={rating === value}>
+                    <input id={`restaurant-rating-${value}`} type="radio" name="restaurant-rating" {value} bind:group={rating} />
+                    {#if value > 0}<Star size={15} fill="currentColor" aria-hidden="true" />{/if}
+                    <span>{value === 0 ? '未評分（0 星）' : `${value} 星`}</span>
+                  </label>
+                {/each}
+              </div>
+              {#if ratingError}<p id="restaurant-rating-error" class="field-error" role="alert">{ratingError}</p>{/if}
+            </fieldset>
             <div class="form-field">
               <label for={imageMode === 'url' ? 'restaurant-image-url' : 'restaurant-image'}>店家或餐點圖片 <span aria-hidden="true">*</span></label>
               <div class="image-methods" role="group" aria-label="圖片來源">
@@ -418,7 +505,7 @@
           <div class="form-actions">
             <Button type="button" variant="outline" onclick={() => changeOpen(false)} disabled={saving || categorySaving}>取消</Button>
             <Button type="submit" class="collection-add" disabled={busy || saving || categorySaving || fileLoading}>
-              <Plus size={16} aria-hidden="true" />{categorySaving ? '正在儲存分類…' : saving ? '正在儲存…' : fileLoading ? '正在讀取圖片…' : '加入圖鑑'}
+              {#if editingRestaurant}<Pencil size={16} aria-hidden="true" />{:else}<Plus size={16} aria-hidden="true" />{/if}{categorySaving ? '正在儲存分類…' : saving ? '正在儲存…' : fileLoading ? '正在讀取圖片…' : editingRestaurant ? '儲存變更' : '加入圖鑑'}
             </Button>
           </div>
         </form>
@@ -466,31 +553,68 @@
     <span class="result-count" role="status">{query.trim() ? `找到 ${filtered.length} 間店家` : '每一間，都是午餐的好選擇。'}</span>
   </div>
 
+  <div class="selection-toolbar" role="group" aria-label="管理勾選店家">
+    <label class="selection-label">
+      <input type="checkbox" name="select-visible-restaurants" checked={allVisibleSelected} disabled={busy || !!removingId || !filtered.length} onchange={(event) => toggleVisible(event.currentTarget.checked)} />
+      全選目前顯示的 {filtered.length} 間
+    </label>
+    <p class="selection-count" role="status">已選 {selectedRestaurants.length} 間{hiddenSelectedCount ? `（含搜尋範圍外 ${hiddenSelectedCount} 間）` : ''}</p>
+    <div class="selection-actions">
+      <Button type="button" variant="outline" disabled={busy || !!removingId || selectedRestaurants.length !== 1} onclick={() => openEdit(selectedRestaurants[0])}><Pencil size={16} aria-hidden="true" />編輯所選店家</Button>
+      <Button id="remove-selected-restaurants" type="button" variant="outline" disabled={busy || !!removingId || !selectedRestaurants.length} onclick={askBatchRemove}><Trash2 size={16} aria-hidden="true" />刪除所選店家</Button>
+      {#if selectedRestaurants.length}
+        <Button type="button" variant="ghost" disabled={busy || !!removingId} onclick={() => { selectedIds = []; }}>清除勾選</Button>
+      {/if}
+    </div>
+  </div>
+  {#if batchRemoval.length}
+    <div class="remove-confirmation batch-confirmation" aria-labelledby="batch-removal-heading" aria-busy={!!removingId}>
+      <h3 id="batch-removal-heading">確定移除這 {batchRemoval.length} 間店家？</h3>
+      <ul>{#each batchRemoval as restaurant (restaurant.id)}<li>{restaurant.name}</li>{/each}</ul>
+      <p>只會刪除上方列出的店家，包含搜尋範圍外的勾選項目；歷史菜單會保留。</p>
+      <div class="confirmation-actions">
+        <Button type="button" variant="outline" bind:ref={batchCancelButton} disabled={!!removingId} onclick={cancelBatchRemove}>取消</Button>
+        <Button type="button" variant="destructive" disabled={busy || !!removingId} onclick={() => removeRestaurants(batchRemoval)}>{removingId ? '正在移除…' : `確定移除 ${batchRemoval.length} 間`}</Button>
+      </div>
+      {#if removeError}<p class="field-error" role="alert">{removeError}</p>{/if}
+    </div>
+  {/if}
+
   <p class="sr-only" role="status">{announcement}</p>
   {#if filtered.length}
     <div class="restaurant-grid">
       {#each filtered as restaurant (restaurant.id)}
-        <article class="restaurant-card" aria-labelledby={`restaurant-${restaurant.id}`}>
+        <article class="restaurant-card" class:selected={selectedIds.includes(restaurant.id)} aria-labelledby={`restaurant-${restaurant.id}`} aria-busy={removingId === restaurant.id}>
           <div class="card-image-wrap">
             <img class="card-image" src={restaurant.image} referrerpolicy="no-referrer" alt={`${restaurant.name}的店家或餐點照片`} loading="lazy" />
             <span class="card-category">{restaurant.category || '自選店家'}</span>
           </div>
           <div class="card-body">
+            <label class="selection-label card-selection">
+              <input type="checkbox" name="selected-restaurants" value={restaurant.id} checked={selectedIds.includes(restaurant.id)} disabled={busy || !!removingId} onchange={(event) => toggleSelected(restaurant.id, event.currentTarget.checked)} />
+              <span>選取<span class="sr-only">「{restaurant.name}」</span></span>
+            </label>
             <div class="card-title-row">
               <h3 id={`restaurant-${restaurant.id}`}>{restaurant.name}</h3>
               <Button id={`remove-restaurant-${restaurant.id}`} type="button" variant="ghost" size="icon" class="remove-button" aria-label={`移除「${restaurant.name}」`} disabled={busy || !!removingId} onclick={() => askRemove(restaurant.id)}>
                 <Trash2 size={16} strokeWidth={1.6} aria-hidden="true" />
               </Button>
             </div>
+            <p class="card-rating">
+              {#each [1, 2, 3, 4, 5] as value}
+                <Star size={15} fill={value <= (restaurant.rating || 0) ? 'currentColor' : 'none'} aria-hidden="true" />
+              {/each}
+              <span>{restaurant.rating ? `${restaurant.rating} 星` : '未評分'}</span>
+            </p>
             {#if restaurant.address}
               <p class="card-address"><MapPin size={16} aria-hidden="true" /><span>{restaurant.address}</span></p>
             {/if}
             {#if confirmingId === restaurant.id}
               <div class="remove-confirmation">
-                <p>確定將這間店移出圖鑑？</p>
+                <p>確定將「{restaurant.name}」移出圖鑑？歷史菜單會保留。</p>
                 <div class="confirmation-actions">
                   <Button type="button" variant="outline" size="sm" bind:ref={cancelRemoveButton} disabled={!!removingId} onclick={() => cancelRemove(restaurant.id)}>取消</Button>
-                  <Button type="button" variant="destructive" size="sm" disabled={busy || !!removingId} onclick={() => removeRestaurant(restaurant)}>{removingId === restaurant.id ? '正在移除…' : '確定移除'}</Button>
+                  <Button type="button" variant="destructive" size="sm" disabled={busy || !!removingId} onclick={() => removeRestaurants([restaurant])}>{removingId === restaurant.id ? '正在移除…' : '確定移除'}</Button>
                 </div>
                 {#if removeError}<p class="field-error" role="alert">{removeError}</p>{/if}
               </div>
@@ -562,6 +686,25 @@
   :global(.collection-dialog) { width: min(480px, calc(100% - 32px)); max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; border-radius: 18px; background: var(--paper, #fbf9f5); color: var(--ink, #302c28); padding: 27px; }
   .restaurant-form { margin-top: 7px; font-size: 16px; line-height: 1.6; }
   fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 19px; }
+  .rating-field { display: block; }
+  .rating-field legend { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+  .rating-options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .rating-option { display: flex; align-items: center; gap: 6px; min-height: 42px; border: 1px solid #a99f94; border-radius: 8px; background: white; padding: 7px 10px; cursor: pointer; }
+  .rating-option.chosen { border-color: #934022; background: #f8eae2; }
+  .rating-option :global(svg) { color: #934022; }
+  .rating-option input, .selection-label input { width: 18px; height: 18px; flex-shrink: 0; accent-color: #934022; cursor: pointer; }
+  .selection-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 24px; }
+  .selection-label { display: flex; align-items: center; gap: 8px; min-height: 40px; font-size: 14px; cursor: pointer; }
+  .selection-count { font-size: 14px; color: #6e6458; margin: 0; overflow-wrap: anywhere; }
+  .selection-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .restaurant-card.selected { border-color: #934022; }
+  .card-selection { width: fit-content; margin-bottom: 4px; }
+  .card-rating { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; color: #934022; margin: 7px 0; }
+  .card-rating span { font-size: 13px; margin-left: 5px; color: #6e6458; }
+  .batch-confirmation { border: 1px solid #a99f94; border-radius: 12px; padding: 17px; margin: 0 0 24px; background: white; }
+  .batch-confirmation h3 { font-size: 18px; }
+  .batch-confirmation ul { margin: 10px 0; padding-left: 24px; overflow-wrap: anywhere; }
+  .batch-confirmation .field-error { margin-top: 10px; }
   .form-field { display: grid; gap: 8px; min-width: 0; }
   .form-field > label, .category-fields > label { font-size: 16px; font-weight: 600; }
   .form-field > label > span:not(.optional) { color: var(--accent, #bd492e); }

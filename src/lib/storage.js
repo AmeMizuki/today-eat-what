@@ -1,5 +1,5 @@
-/** @typedef {{ id: string, name: string, image: string, category?: string, address?: string }} Restaurant */
-/** @typedef {{ restaurants: Restaurant[], categories: string[], weekStart: string, selections: Record<string, Restaurant> }} LunchState */
+/** @typedef {{ id: string, name: string, image: string, category?: string, address?: string, rating?: number }} Restaurant */
+/** @typedef {{ restaurants: Restaurant[], categories: string[], weekStart: string, selections: Record<string, Restaurant>, dailyDraw?: { date: string, restaurant: Restaurant } }} LunchState */
 export const defaultCategories = ['台式料理', '日式料理', '韓式料理', '異國料理', '輕食健康', '其他'];
 
 const DATABASE_NAME = 'lunch-gacha';
@@ -91,21 +91,33 @@ function openDatabase() {
   return opening;
 }
 
-/** @param {'readonly' | 'readwrite'} mode @param {string} [json] */
-async function transact(mode, json) {
+/** @param {(stored: unknown) => LunchState} update @returns {Promise<LunchState>} */
+async function transact(update) {
   const database = await openDatabase();
-  const message = mode === 'readonly'
-    ? '讀取午餐資料失敗，請重新整理後再試。'
-    : '午餐資料儲存失敗，這次變更尚未儲存，請再試一次。';
+  const message = '午餐資料儲存失敗，這次變更尚未儲存，請再試一次。';
 
   return new Promise((resolve, reject) => {
     try {
-      const transaction = database.transaction(STORE_NAME, mode, mode === 'readwrite' ? { durability: 'strict' } : undefined);
+      // Keep reads and updates in one transaction so other tabs cannot reroll or erase the daily draw.
+      const transaction = database.transaction(STORE_NAME, 'readwrite', { durability: 'strict' });
       const store = transaction.objectStore(STORE_NAME);
-      const request = mode === 'readonly' ? store.get(STATE_KEY) : store.put(json, STATE_KEY);
-      transaction.oncomplete = () => resolve(request.result);
-      transaction.onerror = () => reject(new Error(message, { cause: transaction.error ?? request.error }));
-      transaction.onabort = () => reject(new Error(message, { cause: transaction.error }));
+      const request = store.get(STATE_KEY);
+      /** @type {LunchState} */
+      let saved;
+      /** @type {unknown} */
+      let failure;
+      request.onsuccess = () => {
+        try {
+          const json = JSON.stringify(update(request.result));
+          saved = JSON.parse(json);
+          store.put(json, STATE_KEY);
+        } catch (cause) {
+          failure = cause;
+          transaction.abort();
+        }
+      };
+      transaction.oncomplete = () => resolve(saved);
+      transaction.onabort = () => reject(failure ?? new Error(message, { cause: transaction.error ?? request.error }));
     } catch (cause) {
       reject(new Error(message, { cause }));
     }
@@ -124,7 +136,8 @@ function isRestaurant(value) {
     && typeof value.name === 'string' && value.name.trim().length > 0
     && typeof value.image === 'string'
     && (value.category === undefined || typeof value.category === 'string')
-    && (value.address === undefined || typeof value.address === 'string');
+    && (value.address === undefined || typeof value.address === 'string')
+    && (value.rating === undefined || (typeof value.rating === 'number' && Number.isInteger(value.rating) && value.rating >= 0 && value.rating <= 5));
 }
 
 /** @param {unknown} value @returns {value is string} */
@@ -145,18 +158,20 @@ function isState(value) {
     || !value.categories.every((category) => typeof category === 'string'
       && category === category.trim() && category.length > 0 && category.length <= 30)
     || new Set(value.categories.map((category) => category.toLocaleLowerCase())).size !== value.categories.length)) return false;
+  if (value.dailyDraw !== undefined && (!isRecord(value.dailyDraw)
+    || !isDateKey(value.dailyDraw.date) || !isRestaurant(value.dailyDraw.restaurant))) return false;
 
   // History contains snapshots, including restaurants removed from the collection.
   return Object.entries(value.selections).every(([date, restaurant]) => isDateKey(date) && isRestaurant(restaurant));
 }
 
-/** @param {Restaurant[]} seeds @returns {Promise<LunchState>} */
-export async function loadState(seeds) {
-  const stored = await transact('readonly');
+/** @param {unknown} stored @param {Restaurant[]} seeds @param {Date} date @returns {LunchState} */
+function readState(stored, seeds, date) {
   if (stored === undefined) {
-    return { restaurants: seeds.map((restaurant) => ({ ...restaurant })), categories: [...defaultCategories], weekStart: startOfWeek(), selections: {} };
+    const initial = { restaurants: seeds.map((restaurant) => ({ ...restaurant })), categories: [...defaultCategories], weekStart: startOfWeek(date), selections: {} };
+    if (!isState(initial)) throw new Error('初始午餐資料格式不正確。');
+    return initial;
   }
-
   if (typeof stored !== 'string') {
     throw new Error('已儲存的午餐資料格式不正確，原始資料已保留，未自動重設。');
   }
@@ -170,8 +185,7 @@ export async function loadState(seeds) {
   if (!isState(state)) {
     throw new Error('已儲存的午餐資料內容不完整或格式不正確，原始資料已保留，未自動重設。');
   }
-  const migrated = state.categories === undefined;
-  if (migrated) {
+  if (state.categories === undefined) {
     state.categories = [...defaultCategories];
     const known = new Set(state.categories.map((category) => category.toLocaleLowerCase()));
     for (const restaurant of [...state.restaurants, ...Object.values(state.selections)]) {
@@ -185,12 +199,19 @@ export async function loadState(seeds) {
       }
     }
   }
-  const next = currentWeek(state);
-  if (migrated || next !== state) await saveState(next);
-  return next;
+  const today = localDate(date);
+  if (state.selections[today] && (!state.dailyDraw || state.dailyDraw.date < today)) {
+    state.dailyDraw = { date: today, restaurant: { ...state.selections[today] } };
+  }
+  return currentWeek(state, date);
 }
 
-/** @param {LunchState} state @returns {Promise<void>} */
+/** @param {Restaurant[]} seeds @returns {Promise<LunchState>} */
+export function loadState(seeds) {
+  return transact((stored) => readState(stored, seeds, new Date()));
+}
+
+/** @param {LunchState} state @returns {Promise<LunchState>} */
 export async function saveState(state) {
   let json;
   try {
@@ -198,5 +219,48 @@ export async function saveState(state) {
   } catch (cause) {
     throw new Error('午餐資料無法轉換為儲存格式，這次變更尚未儲存。', { cause });
   }
-  await transact('readwrite', json);
+  return transact((stored) => {
+    const date = new Date();
+    const next = readState(json, [], date);
+    if (stored !== undefined) {
+      const existing = readState(stored, [], date);
+      if (existing.dailyDraw && (!next.dailyDraw || existing.dailyDraw.date >= next.dailyDraw.date)) {
+        next.dailyDraw = existing.dailyDraw;
+      }
+    }
+    return next;
+  });
+}
+
+/** @param {Restaurant[]} seeds @returns {Promise<LunchState>} */
+export function recordDailyDraw(seeds) {
+  return transact((stored) => {
+    const date = new Date();
+    const state = readState(stored, seeds, date);
+    const today = localDate(date);
+    if (state.dailyDraw?.date === today) return state;
+    if (state.restaurants.length === 0) throw new Error('請先加入店家，再抽取今天的午餐。');
+    const restaurant = state.restaurants[Math.floor(Math.random() * state.restaurants.length)];
+    return { ...state, dailyDraw: { date: today, restaurant: { ...restaurant } } };
+  });
+}
+
+/** @returns {Promise<boolean | null>} */
+export async function storageStatus() {
+  try {
+    if (typeof navigator === 'undefined' || typeof navigator.storage?.persisted !== 'function') return null;
+    return await navigator.storage.persisted();
+  } catch {
+    return null;
+  }
+}
+
+/** @returns {Promise<boolean | null>} */
+export async function requestPersistence() {
+  try {
+    if (typeof navigator === 'undefined' || typeof navigator.storage?.persist !== 'function') return null;
+    return await navigator.storage.persist();
+  } catch {
+    return null;
+  }
 }

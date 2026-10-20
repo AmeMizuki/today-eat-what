@@ -5,7 +5,7 @@
   import * as Dialog from '$lib/components/ui/dialog/index.js'
   import Collection from './lib/Collection.svelte'
   import GachaReveal from './lib/GachaReveal.svelte'
-  import { currentWeek, deleteCategory, loadState, localDate, saveState, startOfWeek } from './lib/storage.js'
+  import { currentWeek, deleteCategory, loadState, localDate, saveState, startOfWeek, recordDailyDraw, storageStatus, requestPersistence } from './lib/storage.js'
   import { seeds } from './lib/seeds.js'
   const base = import.meta.env.BASE_URL
 
@@ -21,6 +21,11 @@
   let resultOpen = $state(false)
   let helpOpen = $state(false)
   let drawRun = $state(0)
+  let resultDate = $state('')
+  let persistent = $state(undefined)
+  let storageBusy = $state(false)
+  let storageNotice = $state('')
+  const todayDraw = $derived(state?.dailyDraw?.date === today ? state.dailyDraw : null)
   const week = $derived(state ? currentWeek(state, now) : null)
   const restaurants = $derived(state?.restaurants ?? [])
   const today = $derived(localDate(now))
@@ -45,6 +50,7 @@
   }
   onMount(() => {
     void initialize()
+    void storageStatus().then(value => persistent = value)
     const timer = setInterval(() => {
       now = new Date()
       if (state && !busy && state.weekStart !== startOfWeek(now)) {
@@ -57,8 +63,7 @@
     busy = true
     error = ''
     try {
-      await saveState(next)
-      state = next
+      state = await saveState(next)
     } catch (e) {
       error = e instanceof Error ? e.message : '儲存失敗，請確認瀏覽器儲存空間後重試。'
       throw e
@@ -69,9 +74,16 @@
     await persist({ ...currentWeek(state, new Date()), restaurants: [...restaurants, restaurant] })
     notice = `已將「${restaurant.name}」加入卡池。`
   }
-  async function removeRestaurant(id) {
+  async function updateRestaurant(restaurant) {
     if (!state || busy) throw new Error('資料處理中，請稍後再試。')
-    await persist({ ...currentWeek(state, new Date()), restaurants: restaurants.filter(item => item.id !== id) })
+    if (!restaurants.some(item => item.id === restaurant.id)) throw new Error('這家店已不存在，請重新整理。')
+    if (!Number.isInteger(restaurant.rating ?? 0) || (restaurant.rating ?? 0) < 0 || restaurant.rating > 5) throw new Error('評分請選擇 0 至 5 顆星。')
+    await persist({ ...currentWeek(state, new Date()), restaurants: restaurants.map(item => item.id === restaurant.id ? restaurant : item) })
+    notice = `已更新「${restaurant.name}」，歷史菜單與已抽出的卡片不變。`
+  }
+  async function removeRestaurant(ids) {
+    if (!state || busy) throw new Error('資料處理中，請稍後再試。')
+    await persist({ ...currentWeek(state, new Date()), restaurants: restaurants.filter(item => !ids.includes(item.id)) })
     notice = '已移出卡池，已確認的本週紀錄仍會保留。'
   }
   async function addCategory(value) {
@@ -89,14 +101,39 @@
     await persist(deleteCategory(currentWeek(state, new Date()), name))
     notice = `已刪除「${name}」分類，店家保留為自選店家，本週紀錄不受影響。`
   }
-  function draw() {
-    if (drawing || busy || !restaurants.length || loading) return
-    error = ''
-    notice = ''
-    result = { ...restaurants[Math.floor(Math.random() * restaurants.length)] }
+  function showToday() {
+    if (!todayDraw || busy || drawing) return
+    result = { ...todayDraw.restaurant }
+    resultDate = todayDraw.date
     drawRun += 1
     drawing = true
     resultOpen = true
+  }
+  async function draw() {
+    if (drawing || busy || loading || !state) return
+    now = new Date()
+    if (state.dailyDraw?.date === localDate(now)) { showToday(); return }
+    if (!restaurants.length) return
+    busy = true
+    error = ''
+    notice = ''
+    try {
+      state = await recordDailyDraw(seeds)
+      result = { ...state.dailyDraw.restaurant }
+      resultDate = state.dailyDraw.date
+      drawRun += 1
+      drawing = true
+      resultOpen = true
+    } catch (e) {
+      error = e instanceof Error ? e.message : '抽卡結果尚未儲存，請重試。'
+    } finally { busy = false }
+  }
+  async function enablePersistence() {
+    storageBusy = true
+    try {
+      persistent = await requestPersistence()
+      storageNotice = persistent === true ? '已啟用持久儲存。' : '瀏覽器未核准持久儲存；現有資料仍保留於 IndexedDB。'
+    } finally { storageBusy = false }
   }
   async function finishReveal() {
     if (!drawing || !resultOpen) return
@@ -111,6 +148,10 @@
   async function confirmLunch() {
     if (!state || !result || busy) return
     now = new Date()
+    if (resultDate !== localDate(now)) {
+      error = '這張卡片不是今天抽出的，請關閉後抽取今天的午餐。'
+      return
+    }
     const next = currentWeek(state, now)
     try {
       await persist({ ...next, selections: { ...next.selections, [localDate(now)]: { ...result } } })
@@ -163,10 +204,10 @@
         </div>
         <div class="draw-bar">
           <div class="pool-summary"><div class="avatar-stack"><img src={`${base}images/ramen.jpg`} alt="" /><img src={`${base}images/rice.jpg`} alt="" /><img src={`${base}images/salad.jpg`} alt="" /></div><div><strong>{loading ? '正在準備卡池…' : `卡池裡有 ${restaurants.length} 家美味`}</strong><span>每家機率相同，每次只抽一張</span></div><button class="pool-link" onclick={() => navigate('collection')} aria-label="管理抽卡店家"><ChevronRight size={19} /></button></div>
-          <div class="draw-action"><span class="free-label">無限次數 · 免費召喚</span><Button class="draw-button" onclick={draw} disabled={loading || !state || drawing || busy || restaurants.length === 0}><Dices size={23} />{drawing ? '好運降臨中…' : '召喚我的午餐'}<ArrowRight size={20} /></Button></div>
+          <div class="draw-action"><span class="free-label">每天一次 · 免費召喚</span><Button class="draw-button" onclick={draw} disabled={loading || !state || drawing || busy || (!todayDraw && restaurants.length === 0)}><Dices size={23} />{drawing ? '好運降臨中…' : todayDraw ? '查看今日卡片' : '召喚我的午餐'}<ArrowRight size={20} /></Button></div>
         </div>
         {#if !loading && restaurants.length === 0}<div class="empty-pool">卡池還空著。<button onclick={() => navigate('collection')}>先新增一家喜歡的店 <ArrowRight size={14} /></button></div>{/if}
-        <div class="game-details"><span><ShieldCheck size={14} />只存在你的裝置，安心收藏</span><span><RotateCcw size={14} />不心動？隨時再抽一次</span><span><Check size={14} />確認後才記入菜單</span></div>
+        <div class="game-details"><span><ShieldCheck size={14} />只存在你的裝置，安心收藏</span><span><CalendarDays size={14} />每天一張，明天再抽</span><span><Check size={14} />確認後才記入菜單</span></div>
       </section>
       <section class="weekly-section" aria-labelledby="weekly-title">
         <div class="section-heading"><div><h2 id="weekly-title">這週的美味足跡<span class="small-tag">{weekLabel}</span></h2><p>好好吃飯，也是認真生活的一部分。</p></div><button class="text-link" onclick={() => navigate('week')}>查看本週菜單<ArrowRight size={16} /></button></div>
@@ -177,11 +218,11 @@
       </section>
       <section class="collection-banner"><div class="banner-icon"><BookOpen size={24} strokeWidth={1.5} /></div><div><h3>你的口袋名單，就是專屬卡池。</h3><p>上傳店家照片，讓喜歡的美味都有機會被抽中。</p></div><Button variant="outline" class="collection-cta" onclick={() => navigate('collection')}><Plus size={16} />管理我的店家</Button></section>
     {:else if view === 'collection'}
-      {#if state}<Collection {restaurants} categories={state.categories} {busy} onadd={addRestaurant} onremove={removeRestaurant} oncategoryadd={addCategory} oncategoryremove={removeCategory} />{:else if loading}<div class="loading-surface">正在讀取店家圖鑑…</div>{/if}
+      {#if state}<Collection {restaurants} categories={state.categories} {busy} onadd={addRestaurant} onupdate={updateRestaurant} onremove={removeRestaurant} oncategoryadd={addCategory} oncategoryremove={removeCategory} />{:else if loading}<div class="loading-surface">正在讀取店家圖鑑…</div>{/if}
     {:else}
       <section class="week-page">
         <div class="page-heading"><div><h1>本週菜單</h1><p>把每天的小確幸，收進這一週。</p></div><span class="week-range"><CalendarDays size={17} />{weekLabel}</span></div>
-        <div class="weekly-summary"><span>本週已確認 <strong>{selectedCount}</strong> 餐</span><span>週一重置紀錄，店家圖鑑永久保留</span></div>
+        <div class="weekly-summary"><span>本週已確認 <strong>{selectedCount}</strong> 餐</span><span>週一重置紀錄，店家圖鑑持續保留於此瀏覽器</span></div>
         <div class="week-list">
           {#each days as day}
             <article class="week-entry" class:today-entry={day.key === today}>
@@ -198,9 +239,14 @@
             </article>
           {/each}
         </div>
-        <p class="week-explanation">只有按下「今天就吃這家」才會記錄；同一天再次確認，會取代原本的選擇。</p>
+        <p class="week-explanation">每天只能抽一張卡，關閉或重新整理不會重抽；按下「今天就吃這家」才會記入菜單。</p>
       </section>
     {/if}
+    <section class="message data-storage" aria-label="資料保存">
+      <ShieldCheck size={20} aria-hidden="true" />
+      <div><strong>資料保存</strong><p>{persistent === undefined ? '正在檢查儲存狀態…' : persistent === true ? '已啟用瀏覽器持久儲存，可降低自動清除的風險。' : persistent === false ? '資料已存於 IndexedDB；尚未啟用瀏覽器持久儲存。' : '此瀏覽器不支援持久儲存申請，資料仍使用 IndexedDB 保存。'} 清除網站資料、無痕模式或更換裝置仍可能失去資料；圖片網址也取決於來源網站。</p><p role="status">{storageNotice}</p></div>
+      {#if persistent === false}<Button variant="outline" onclick={enablePersistence} disabled={storageBusy}>{storageBusy ? '申請中…' : '申請持久儲存'}</Button>{/if}
+    </section>
   </main>
   <footer class="site-footer"><span class="footer-brand"><UtensilsCrossed size={14} />午餐事務所</span><span>少一點糾結，多一點好好吃飯。</span><span class="made-with">MADE FOR YOUR LUNCH BREAK <Heart size={12} /></span></footer>
 </div>
@@ -214,17 +260,22 @@
     {#if result}
       {#key drawRun}
         <GachaReveal restaurant={result} oncomplete={finishReveal}>
-          {#if todayPick && todayPick.id !== result.id}<p class="replace-note">今天已選「{todayPick.name}」，確認後將更新為這家。</p>{/if}
+          {#if resultDate !== today}<p class="replace-note">這是先前日期抽出的卡片，無法記入今天。</p>{/if}
           {#if error}<p class="result-error" role="alert">{error}</p>{/if}
           <div class="result-actions">
-            <Button variant="outline" onclick={draw} disabled={busy}><RotateCcw size={18} />再抽一次</Button>
-            <Button id="confirm-lunch" onclick={confirmLunch} disabled={busy}><Check size={19} />{busy ? '儲存中…' : '今天就吃這家'}</Button>
+            <Button variant="outline" onclick={() => changeResultOpen(false)} disabled={busy}>稍後決定</Button>
+            <Button id="confirm-lunch" onclick={confirmLunch} disabled={busy || resultDate !== today || todayPick?.id === result.id}><Check size={19} />{busy ? '儲存中…' : todayPick?.id === result.id ? '已記入今天的菜單' : '今天就吃這家'}</Button>
           </div>
-          <p class="result-note">{todayPick?.id === result.id ? '這家已在今天的菜單中，仍可重新確認。' : '確認後，會為你記入本週菜單。'}</p>
+          <p class="result-note">今日抽卡次數已使用，可隨時回來查看這張卡片，明天再抽。</p>
         </GachaReveal>
       {/key}
     {/if}
   </Dialog.Content>
 </Dialog.Root>
 
-<Dialog.Root bind:open={helpOpen}><Dialog.Content class="help-dialog"><Dialog.Header><Dialog.Title>午餐，交給一點好運。</Dialog.Title><Dialog.Description>沒有鑽石、沒有體力限制，只有今天吃什麼。</Dialog.Description></Dialog.Header><ol class="help-steps"><li><BookOpen size={21} /><div><strong>建立專屬卡池</strong><p>到店家圖鑑上傳店名與照片。初始四家為虛構體驗店家，可自由刪除。</p></div></li><li><Dices size={21} /><div><strong>一次一張，隨時重抽</strong><p>所有店家機率相同，也可能再次抽到同一家。</p></div></li><li><CalendarDays size={21} /><div><strong>確認今天的美味</strong><p>確認才會記錄，同日以最後一次選擇為準。週一依裝置當地時間重置本週紀錄。</p></div></li></ol><p class="privacy-note"><ShieldCheck size={17} />資料以 JSON 存於此瀏覽器的 IndexedDB，不會上傳伺服器。清除網站資料會失去收藏與紀錄。</p></Dialog.Content></Dialog.Root>
+<Dialog.Root bind:open={helpOpen}><Dialog.Content class="help-dialog"><Dialog.Header><Dialog.Title>午餐，交給一點好運。</Dialog.Title><Dialog.Description>每天一張，為午餐留一點驚喜。</Dialog.Description></Dialog.Header><ol class="help-steps"><li><BookOpen size={21} /><div><strong>建立專屬卡池</strong><p>新增或編輯店名、照片、分類、地址與五星評分，也能勾選店家批次刪除。</p></div></li><li><Dices size={21} /><div><strong>每天只能抽一次</strong><p>所有店家機率相同。抽卡結果會先保存，關閉或重新整理仍是同一張；每天依裝置當地日期開放新抽卡。</p></div></li><li><CalendarDays size={21} /><div><strong>確認今天的美味</strong><p>確認才會記錄，沒有確認的日期不會記入菜單。週一重置本週紀錄，不刪除店家。</p></div></li></ol><p class="privacy-note"><ShieldCheck size={17} />資料以 JSON 存於此瀏覽器的 IndexedDB，不會上傳伺服器。持久儲存無法防止手動清除，也不跨裝置同步。</p></Dialog.Content></Dialog.Root>
+
+<style>
+  .data-storage { flex-wrap: wrap; align-items: flex-start; border-top: 1px solid var(--line); }
+  .data-storage > div { flex: 1 1 240px; min-width: 0; }
+</style>
